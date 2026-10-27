@@ -57,6 +57,14 @@
 #include "mips/mdct_mipsr1.h"
 #endif
 
+#if !defined(FIXED_POINT) && !defined(ENABLE_QEXT)
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+#endif
+
 #ifndef M_PI
 #define M_PI 3.141592653
 #endif
@@ -206,7 +214,75 @@ void clt_mdct_forward_c(const mdct_lookup *l, kiss_fft_scalar *in, kiss_fft_scal
 #ifdef FIXED_POINT
       opus_val32 maxval=1;
 #endif
-      for(i=0;i<N4;i++)
+      i = 0;
+#if !defined(FIXED_POINT) && !defined(ENABLE_QEXT) && defined(__SSE__)
+      {
+         __m128 sc4 = _mm_set1_ps(scale);
+         for(;i+3<N4;i+=4)
+         {
+            __m128 v0, v1, w0, w1, re4, im4, ts4, tc4, yr4, yi4;
+            v0 = _mm_loadu_ps(yp);
+            v1 = _mm_loadu_ps(yp+4);
+            re4 = _mm_shuffle_ps(v0, v1, _MM_SHUFFLE(2,0,2,0));
+            im4 = _mm_shuffle_ps(v0, v1, _MM_SHUFFLE(3,1,3,1));
+            w0 = _mm_loadu_ps(&t[2*i]);
+            w1 = _mm_loadu_ps(&t[2*i+4]);
+            ts4 = _mm_shuffle_ps(w0, w1, _MM_SHUFFLE(2,0,2,0));   /* -sin */
+            tc4 = _mm_shuffle_ps(w0, w1, _MM_SHUFFLE(3,1,3,1));   /* cos */
+            yr4 = _mm_mul_ps(_mm_sub_ps(_mm_mul_ps(re4, tc4), _mm_mul_ps(im4, ts4)), sc4);
+            yi4 = _mm_mul_ps(_mm_add_ps(_mm_mul_ps(im4, tc4), _mm_mul_ps(re4, ts4)), sc4);
+            {
+               float yr_tmp[4], yi_tmp[4];
+               int k;
+               _mm_storeu_ps(yr_tmp, yr4);
+               _mm_storeu_ps(yi_tmp, yi4);
+               for(k=0;k<4;k++) {
+#if defined(ENABLE_PFA)
+                  int rev = i+k;
+#else
+                  int rev = st->bitrev[i+k];
+#endif
+                  f2[rev].r = yr_tmp[k];
+                  f2[rev].i = yi_tmp[k];
+               }
+            }
+            yp += 8;
+         }
+      }
+#elif !defined(FIXED_POINT) && !defined(ENABLE_QEXT) && defined(__aarch64__)
+      {
+         float32x4_t sc4 = vdupq_n_f32(scale);
+         for(;i+3<N4;i+=4)
+         {
+            float32x4x2_t cpx4 = vld2q_f32(yp);
+            float32x4x2_t tw4 = vld2q_f32(&t[2*i]);
+            float32x4_t re4 = cpx4.val[0];
+            float32x4_t im4 = cpx4.val[1];
+            float32x4_t ts4 = tw4.val[0];   /* -sin */
+            float32x4_t tc4 = tw4.val[1];   /* cos */
+            float32x4_t yr4 = vmulq_f32(vsubq_f32(vmulq_f32(re4, tc4), vmulq_f32(im4, ts4)), sc4);
+            float32x4_t yi4 = vmulq_f32(vaddq_f32(vmulq_f32(im4, tc4), vmulq_f32(re4, ts4)), sc4);
+            {
+               float yr_tmp[4], yi_tmp[4];
+               int k;
+               vst1q_f32(yr_tmp, yr4);
+               vst1q_f32(yi_tmp, yi4);
+               for(k=0;k<4;k++) {
+#if defined(ENABLE_PFA)
+                  int rev = i+k;
+#else
+                  int rev = st->bitrev[i+k];
+#endif
+                  f2[rev].r = yr_tmp[k];
+                  f2[rev].i = yi_tmp[k];
+               }
+            }
+            yp += 8;
+         }
+      }
+#endif
+      /* Scalar cleanup */
+      for(;i<N4;i++)
       {
          kiss_fft_cpx yc;
          kiss_twiddle_scalar t0, t1;
@@ -254,8 +330,67 @@ void clt_mdct_forward_c(const mdct_lookup *l, kiss_fft_scalar *in, kiss_fft_scal
       kiss_fft_scalar * OPUS_RESTRICT yp1 = out;
       kiss_fft_scalar * OPUS_RESTRICT yp2 = out+stride*(N2-1);
       const kiss_twiddle_scalar *t = &trig[0];
-      /* Temp pointers to make it really clear to the compiler what we're doing */
-      for(i=0;i<N4;i++)
+      i = 0;
+#if !defined(FIXED_POINT) && !defined(ENABLE_QEXT) && defined(__SSE__)
+      if (stride == 1)
+      {
+         __m128 v0, v1, w0, w1, re4, im4, ts4, tc4, yr4, yi4;
+         for(;i+3<N4;i+=4)
+         {
+            v0 = _mm_loadu_ps((const float*)&fp[0]);
+            v1 = _mm_loadu_ps((const float*)&fp[2]);
+            re4 = _mm_shuffle_ps(v0, v1, _MM_SHUFFLE(2,0,2,0));
+            im4 = _mm_shuffle_ps(v0, v1, _MM_SHUFFLE(3,1,3,1));
+            w0 = _mm_loadu_ps(&t[2*i]);
+            w1 = _mm_loadu_ps(&t[2*i+4]);
+            ts4 = _mm_shuffle_ps(w0, w1, _MM_SHUFFLE(2,0,2,0));   /* -sin */
+            tc4 = _mm_shuffle_ps(w0, w1, _MM_SHUFFLE(3,1,3,1));   /* cos */
+            yr4 = _mm_sub_ps(_mm_mul_ps(im4, ts4), _mm_mul_ps(re4, tc4));
+            yi4 = _mm_add_ps(_mm_mul_ps(re4, ts4), _mm_mul_ps(im4, tc4));
+            yp1[0] = _mm_cvtss_f32(yr4);
+            yp1[2] = _mm_cvtss_f32(_mm_shuffle_ps(yr4, yr4, 1));
+            yp1[4] = _mm_cvtss_f32(_mm_shuffle_ps(yr4, yr4, 2));
+            yp1[6] = _mm_cvtss_f32(_mm_shuffle_ps(yr4, yr4, 3));
+            yp2[ 0] = _mm_cvtss_f32(yi4);
+            yp2[-2] = _mm_cvtss_f32(_mm_shuffle_ps(yi4, yi4, 1));
+            yp2[-4] = _mm_cvtss_f32(_mm_shuffle_ps(yi4, yi4, 2));
+            yp2[-6] = _mm_cvtss_f32(_mm_shuffle_ps(yi4, yi4, 3));
+            fp += 4;
+            yp1 += 8;
+            yp2 -= 8;
+         }
+      }
+#elif !defined(FIXED_POINT) && !defined(ENABLE_QEXT) && defined(__aarch64__)
+      if (stride == 1)
+      {
+         float32x4x2_t cpx4, tw4;
+         float32x4_t re4, im4, ts4, tc4, yr4, yi4;
+         for(;i+3<N4;i+=4)
+         {
+            cpx4 = vld2q_f32((const float*)&fp[0]);
+            tw4 = vld2q_f32(&t[2*i]);
+            re4 = cpx4.val[0];
+            im4 = cpx4.val[1];
+            ts4 = tw4.val[0];   /* -sin */
+            tc4 = tw4.val[1];   /* cos */
+            yr4 = vsubq_f32(vmulq_f32(im4, ts4), vmulq_f32(re4, tc4));
+            yi4 = vaddq_f32(vmulq_f32(re4, ts4), vmulq_f32(im4, tc4));
+            yp1[0] = vgetq_lane_f32(yr4, 0);
+            yp1[2] = vgetq_lane_f32(yr4, 1);
+            yp1[4] = vgetq_lane_f32(yr4, 2);
+            yp1[6] = vgetq_lane_f32(yr4, 3);
+            yp2[ 0] = vgetq_lane_f32(yi4, 0);
+            yp2[-2] = vgetq_lane_f32(yi4, 1);
+            yp2[-4] = vgetq_lane_f32(yi4, 2);
+            yp2[-6] = vgetq_lane_f32(yi4, 3);
+            fp += 4;
+            yp1 += 8;
+            yp2 -= 8;
+         }
+      }
+#endif
+      /* Scalar cleanup / non-stride-1 path */
+      for(;i<N4;i++)
       {
          kiss_fft_scalar yr, yi;
          kiss_fft_scalar t0, t1;
