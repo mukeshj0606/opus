@@ -294,8 +294,8 @@ static void kf_bfly5(
          const kiss_twiddle_cpx *tw3 = tw;
          const kiss_twiddle_cpx *tw4 = tw;
 
-         /* For non-custom modes, m is guaranteed to be a multiple of 4. */
-         for ( u=0; u<m; ++u ) {
+      /* For non-custom modes, m is guaranteed to be a multiple of 4. */
+      for ( u=0; u<m; ++u ) {
          scratch[0] = *Fout0;
 
          C_MUL(scratch[1] ,*Fout1, *tw1);
